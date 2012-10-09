@@ -1,0 +1,165 @@
+#!/bin/bash
+
+if [[ -z $1 ]]; then
+    echo "Please supply the name for the new CA (e.g., newCA myCA)."
+    exit 1
+fi
+if [[ -z $4 ]]; then
+    echo "Skipping CRL distribution points"
+fi
+if [[ -n $3 ]]; then
+    echo "Using CN $3 for CA certificate"
+fi
+
+echo "Creating new CA \"$1\"."
+if [[ -n $2 ]]; then
+    echo "Using CA key password passed on command line"
+fi
+echo
+
+# Directories
+echo "Building directory structure ... "
+mkdir $1
+mkdir $1/private
+mkdir $1/newcerts
+mkdir $1/crl
+
+# Serial number file
+echo "Writing serial number file ..."
+cat > $1/serial <<EOF
+01
+EOF
+
+# Index file
+echo "Writing blank index file ..."
+touch $1/index.txt
+
+# CSR configuration file
+echo "Writing CSR configuration file ..."
+cat > $1/req.config <<EOF
+[ req ]
+
+default_bits       = 2048
+default_keyfile    = privkey.pem
+distinguished_name = req_distinguished_name
+attributes         = req_attributes
+x509_extensions    = v3_ca
+dirstring_type     = nobmp
+
+[ req_distinguished_name ]
+
+countryName                    = Country Name (2 letter code)
+countryName_default            = US
+countryName_min                = 2
+countryName_max                = 2
+
+stateOrProvinceName            = State or Province Name (full name)
+stateOrProvinceName_default    = My State
+stateOrProvinceName_max        = 64
+
+localityName                   = Locality Name (eg, city)
+localityName_default           = My Locality
+localityName_max               = 64
+
+organizationName               = Organization Name (eg, company)
+organizationName_default       = My Organization
+organizationName_max           = 64
+
+organizationalUnitName         = Organizational Unit Name (eg, section)
+organizationalUnitName_default = My Organizational Unit
+organizationalUnitName_max     = 64
+
+commonName                     = Common Name (eg, your name or your server's hostname)
+commonName_max                 = 128
+
+emailAddress                   = Email Address
+emailAddress_max               = 128
+
+[ req_attributes ]
+
+challengePassword     = A challenge password
+challengePassword_min = 4
+challengePassword_max = 64
+
+[ v3_ca ]
+
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+basicConstraints       = CA:true
+
+EOF
+
+# Configuration file
+echo "Appending CA information to configuration file ..."
+cat >> ca.config <<EOF
+[ ${1}_usr_cert ]
+
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+basicConstraints       = CA:FALSE
+EOF
+
+if [[ -n $4 ]]; then
+    cat >> ca.config <<EOF
+crlDistributionPoints = URI:$4
+EOF
+fi
+
+cat >> ca.config <<EOF
+
+[ ${1}_subCA_cert ]
+
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+basicConstraints       = CA:TRUE
+EOF
+
+if [[ -n $4 ]]; then
+    cat >> ca.config <<EOF
+crlDistributionPoints = URI:$4
+EOF
+fi
+
+cat >> ca.config <<EOF
+
+[ $1 ]
+
+dir              = ./$1 # top dir
+database         = \$dir/index.txt # index file
+new_certs_dir    = \$dir/newcerts # new certs dir
+crl_dir          = \$dir/crl # CRL dir
+
+certificate      = \$dir/cacert.pem # the CA cert
+serial           = \$dir/serial # serial no file
+private_key      = \$dir/private/cakey.pem # CA private key
+RANDFILE         = \$dir/private/.rand # random number file
+
+default_days     = 365 # how long to certify for
+default_crl_days = 30 # how long before next CRL
+default_md       = md5 # md to use
+
+policy           = policy_any # default policy
+x509_extensions  = ${1}_usr_cert # user cert extensions
+
+EOF
+
+# Root certificate generation
+echo "Generating root certificate and key ..."
+cmd="openssl req -config $1/req.config -x509 -days 1827 -newkey rsa:2048 \
+    -keyout $1/private/cakey.pem -out $1/cacert.pem"
+if [[ -n $2 ]]; then
+    cmd="$cmd -passout \"pass:${2}\""
+fi
+if [[ -n $3 ]]; then
+    cmd="$cmd -subj \"/C=US/ST=My State/L=My Locality/O=My Company LLC/CN=$3\""
+fi
+eval $cmd
+if (( $? != 0 )); then
+    echo "CA root certificate generation failed! Remove the $1 CA and start over."
+    exit 2
+fi
+
+cp $1/cacert.pem $1/chain.pem
+
+echo
+echo "CA $1 created."

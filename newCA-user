@@ -1,0 +1,71 @@
+#!/bin/bash
+
+if [[ -z $1 ]]; then
+    echo "Please supply the name for the new CA (e.g., newCA myCA)."
+    exit 1
+fi
+
+echo "Creating user side of new CA \"$1\"."
+echo
+
+# Directories
+echo "Building directory structure ... "
+mkdir $1
+
+# CSR configuration file
+echo "Writing CSR configuration file ..."
+cat > $1/req.config <<EOF
+[ req ]
+
+default_bits       = 2048
+default_keyfile    = privkey.pem
+distinguished_name = req_distinguished_name
+attributes         = req_attributes
+x509_extensions    = v3_ca
+dirstring_type     = nobmp
+
+[ req_distinguished_name ]
+
+countryName                    = Country Name (2 letter code)
+countryName_default            = US
+countryName_min                = 2
+countryName_max                = 2
+
+stateOrProvinceName            = State or Province Name (full name)
+stateOrProvinceName_default    = My State
+stateOrProvinceName_max        = 64
+
+localityName                   = Locality Name (eg, city)
+localityName_default           = My Locality
+localityName_max               = 64
+
+organizationName               = Organization Name (eg, company)
+organizationName_default       = My Organization
+organizationName_max           = 64
+
+organizationalUnitName         = Organizational Unit Name (eg, section)
+organizationalUnitName_default = My Organizational Unit
+organizationalUnitName_max     = 64
+
+commonName                     = Common Name (eg, your name or your server's hostname)
+commonName_max                 = 128
+
+emailAddress                   = Email Address
+emailAddress_max               = 128
+
+[ req_attributes ]
+
+challengePassword     = A challenge password
+challengePassword_min = 4
+challengePassword_max = 64
+
+[ v3_ca ]
+
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer:always
+basicConstraints       = CA:true
+
+EOF
+
+echo
+echo "User side of CA $1 created."

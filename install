@@ -1,0 +1,526 @@
+#!/bin/bash
+
+if [[ -z $1 ]]; then
+    echo "Please supply the name of a top-level directory (e.g., install caroot)."
+    exit 1
+fi
+
+caonly=false
+if [[ $2 == "caonly" ]]; then
+    caonly=true
+fi
+useronly=false
+if [[ $2 == "useronly" ]]; then
+    useronly=true
+fi
+
+echo "Welcome to LitlCA"
+echo "Installing framework into directory $1"
+if [[ "$caonly" == "true" ]]; then
+    echo "- only installing CA side of framework"
+elif [[ "$useronly" == "true" ]]; then
+    echo "- only installing user side of framework"
+fi
+echo
+
+echo "Making top-level directory ..."
+mkdir $1
+
+echo "Building customer area ..."
+mkdir $1/customers
+if [[ "$caonly" != "true" ]]; then
+    mkdir $1/customers/privatekeys
+fi
+mkdir $1/customers/csrs
+mkdir $1/customers/signedcerts
+
+echo "Creating scripts:"
+
+######## helper functions ########
+echo "- helpers.sh ..."
+cat > $1/helpers.sh <<"EOF"
+#!/bin/bash
+
+backup() {
+    f=$1
+    dir=$2
+
+    mkdir -p $dir
+    mv $f $dir
+}
+
+check_ca() {
+    cadir=$1
+    if [[ ! -d $cadir ]]; then
+        echo "CA $cadir does not exist."
+        exit 1
+    fi
+    if [[ ! -e $cadir/req.config ]]; then
+        echo "The CSR configuration file for CA $cadir is not present."
+        exit 1
+    fi
+}
+
+cleanup_if_failed() {
+    rc=$1
+    f=$2
+    msg=$3
+
+    if (( $rc != 0 )); then
+        [[ -f $2 ]] && rm -f $2
+        echo "$3"
+        exit 2
+    fi
+}
+
+if [[ ! $(type -p openssl) ]]; then
+    echo FATAL: OpenSSL is not available on the path.
+    exit 1
+fi
+
+EOF
+chmod +x $1/helpers.sh
+
+######## genkey ########
+if [[ "$caonly" != "true" ]]; then
+    echo "- genkey ..."
+    cat > $1/genkey <<"EOF"
+#!/bin/bash
+# Arguments: alias [, key-password]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 ]]; then
+    echo "Please supply an alias for the new key (e.g., genkey bob)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+
+if [[ -e $keyfile ]]; then
+    echo "A key for $1 is already present. If you want to generate a new one,"
+    echo "please delete the old one first."
+    exit 1
+fi
+
+
+echo "Generating new key for $1 ..."
+echo
+cmd="openssl genrsa -des3 -out $keyfile"
+if [[ -n $2 ]]; then
+    cmd="$cmd -passout pass:$2 2048"
+else
+    cmd="$cmd 2048"
+fi
+eval $cmd
+
+cleanup_if_failed $? $keyfile "Key generation failed!"
+
+echo
+echo "Done. New key is in $keyfile."
+EOF
+    chmod +x $1/genkey
+fi
+
+######## replacekey ########
+if [[ "$caonly" != "true" ]]; then
+    echo "- replacekey ..."
+    cat > $1/replacekey <<"EOF"
+#!/bin/bash
+# Arguments: alias [, key-password]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 ]]; then
+    echo "Please supply an alias for the new key (e.g., replacekey bob)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+backupdir="customers/privatekeys/replaced"
+backupkeyfile="$backupdir/${1}key.pem"
+
+if [[ ! -e $keyfile ]]; then
+    echo "No prior private key for $1 is present. If you want to generate a"
+    echo "new one, please run genkey instead."
+    exit 1
+fi
+
+echo "Backing up old private key for $1"
+backup $keyfile $backupdir
+echo "Done. Old private key is in $backupkeyfile."
+echo "If you want to go back to using the old private key, put this file back."
+
+echo "Replacing key for $1"
+echo
+cmd="openssl genrsa -des3 -out $keyfile"
+if [[ -n $2 ]]; then
+    cmd="$cmd -passout pass:$2 2048"
+else
+    cmd="$cmd 2048"
+fi
+eval $cmd
+
+cleanup_if_failed $? $keyfile "Key generation failed!"
+
+echo
+echo "Done. New key is in $keyfile."
+EOF
+    chmod +x $1/replacekey
+fi
+
+######## gencsr and genrenewcsr ########
+if [[ "$caonly" != "true" ]]; then
+    echo "- gencsr ..."
+    cat > $1/gencsr <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA [, key-password [, cn]]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 ]]; then
+    echo "Please supply a key alias and a CA (e.g., gencsr bob myCA)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+reqdir="customers/csrs/$2"
+reqfile="$reqdir/${1}req.pem"
+
+if [[ ! -e $keyfile ]]; then
+    echo "No private key for $1 is present."
+    exit 1
+fi
+if [[ -e $reqfile ]]; then
+    echo "A CSR for $1 already exists for CA $2. You should use this CSR"
+    echo "unless you need to renew, in which case you should use the"
+    echo "genrenewcsr script instead. If you generated a new key for $1,"
+    echo "just delete this CSR and run this script again."
+    exit 1
+fi
+
+check_ca $2
+
+mkdir -p $reqdir
+
+echo "Generating new CSR for $1 for CA $2 ..."
+echo
+cmd="openssl req -config $2/req.config -new -key $keyfile -out $reqfile"
+if [[ -n $3 ]]; then
+    cmd="$cmd -passin pass:$3"
+fi
+if [[ -n $4 ]]; then
+    cmd="$cmd -subj \"/C=US/ST=My State/L=My Locality/O=My Company LLC/CN=$4\""
+fi
+eval $cmd
+
+cleanup_if_failed $? $reqfile "CSR generation failed!"
+
+echo
+echo "Done. New CSR is in $reqfile."
+EOF
+    chmod +x $1/gencsr
+
+    echo "- genrenewcsr ..."
+    cat > $1/genrenewcsr <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 ]]; then
+    echo "Please supply a key alias and a CA (e.g., genrenewcsr bob myCA)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+reqdir="customers/csrs/$2"
+reqfile="$reqdir/${1}req.pem"
+certfile="customers/signedcerts/$2/${1}cert.pem"
+backupcertdir="customers/signedcerts/$2/invalid"
+backupcertfile="$backupcertdir/${1}cert.pem"
+backupreqdir="customers/csrs/$2/old"
+backupreqfile="$backupreqdir/${1}req.pem"
+
+if [[ ! -e $keyfile ]]; then
+    echo "No private key for $1 is present."
+    exit 1
+fi
+if [[ ! -e $reqfile ]]; then
+    echo "No prior CSR for $1 for CA $2 is present. If this is the first"
+    ecgi "CSR being generated for $1 for CA $2, you should use"
+    echo "the gencsr script instead."
+    exit 1
+fi
+
+if [[ ! -e $certfile ]]; then
+    echo "No prior signed certificate for $1 for CA $2 is present. If this"
+    echo "is the first CSR being generated for $1 for CA $2, you should use"
+    echo "the gencsr script instead."
+    exit 1
+fi
+
+echo "Backing up old signed certificate ..."
+backup $certfile $backupcertdir
+echo "Done. Old certificate is in $backupcertfile."
+echo "If you need to generate a renewal CSR again, put this file back, so that"
+echo "this script will work again."
+
+echo "Backing up old CSR ..."
+backup $reqfile $backupreqdir
+echo "Done. Old CSR is in $backupreqfile."
+echo "If you need to generate a renewal CSR again, put this file back, so that"
+echo "this script will work again. DO NOT use gencsr to generate a new CSR;"
+echo "you must use this script to generate a proper renewal CSR."
+
+echo "Generating renewal CSR for $1 for CA $2 ..."
+echo
+openssl x509 -x509toreq -in $backupcertfile -out $reqfile -signkey $keyfile
+cleanup_if_failed $? $reqfile "Renewal CSR generation failed!"
+
+echo
+echo "Done. Renewal CSR is in $reqfile."
+EOF
+    chmod +x $1/genrenewcsr
+fi
+
+######## signcsr ########
+if [[ "$useronly" != "true" ]]; then
+    echo "- signcsr ..."
+    cat > $1/signcsr <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA [, CA-password]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 ]]; then
+    echo "Please supply a key alias and a CA (e.g., signcsr bob myCA)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+reqdir="customers/csrs/$2"
+reqfile="$reqdir/${1}req.pem"
+certdir="customers/signedcerts/$2"
+certfile="$certdir/${1}cert.pem"
+
+check_ca $2
+
+if [[ ! -e $reqfile ]]; then
+    echo "A CSR for $1 for CA $2 is not present."
+    exit 1
+fi
+if [[ -e $certfile ]]; then
+    echo "A signed certificate for $1 for CA $2 is already present. Please move"
+    echo "it out of the way before signing a new one."
+    exit 1
+fi
+
+mkdir -p $certdir
+
+echo "Signing CSR for $1 with CA $2 ..."
+echo
+cmd="openssl ca -config ca.config -name $2 -in $reqfile -notext \
+    -out $certfile -batch"
+if [[ -n $3 ]]; then
+    cmd="$cmd -passin pass:$3"
+fi
+eval $cmd
+
+cleanup_if_failed $? $certfile "Signed certificate generation failed!"
+if [[ ! -s $certfile ]]; then
+    rm -f $certfile
+    echo "Signed certificate generation cancelled."
+    exit 2
+fi
+echo
+echo "Done. Signed certificate is in $certfile."
+EOF
+    chmod +x $1/signcsr
+fi
+
+######## genpkcs12 ########
+if [[ "$caonly" != "true" ]]; then
+    echo "- genpkcs12 ..."
+    cat > $1/genpkcs12 <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA, name [, key-password [, pkcs12-password]]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 || -z $3 ]]; then
+    echo "Please supply a key alias, CA, and friendly name (e.g.,"
+    echo "genpkcs12 bob myCA \"Mr. Bob Smith\")."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+certdir="customers/signedcerts/$2"
+certfile="$certdir/${1}cert.pem"
+pkcs12dir="customers/privatekeys/$2-pkcs12"
+pkcs12file="$pkcs12dir/${1}key.p12"
+
+if [[ ! -e $keyfile ]]; then
+    echo "No private key for $1 is present."
+    exit 1
+fi
+if [[ ! -e $certfile ]]; then
+    echo "A signed certificate for $1 for CA $2 is not present."
+    exit 1
+fi
+
+if [[ -e $pkcs12file ]]; then
+    echo "Warning: A PKCS#12 file for $1 for CA $2 is already present. It will"
+    echo "be replaced now. If you want the old one back later, you can"
+    echo "regenerate it with this script using the private key for $1 and"
+    echo "the same signed certificate from CA $2 as before."
+    echo
+fi
+
+mkdir -p $pkcs12dir
+
+echo "Generating PKCS#12 file for $1 from signed certificate from CA $2 ..."
+echo
+cmd="openssl pkcs12 -export -in $certfile -inkey $keyfile -out $pkcs12file \
+    -name \"$3\" -certfile $2/chain.pem"
+if [[ -n $4 ]]; then
+    cmd="$cmd -passin pass:$4"
+    if [[ -n $5 ]]; then
+        cmd="$cmd -passout pass:$5"
+    else
+        cmd="$cmd -passout pass:$4"
+    fi
+fi
+eval $cmd
+cleanup_if_failed $? $pkcs12file "PKCS#12 file generation failed!"
+
+echo
+echo "Done. PKCS#12 file is in $pkcs12file."
+EOF
+    chmod +x $1/genpkcs12
+fi
+
+######## verify ########
+echo "- verify ..."
+cat > $1/verify <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 ]]; then
+    echo "Please supply a key alias and CA (e.g., verify bob myCA)."
+    exit 1
+fi
+certdir="customers/signedcerts/$2"
+certfile="$certdir/${1}cert.pem"
+
+if [[ ! -e $certfile ]]; then
+    echo "A signed certificate for $1 for CA $2 is not present."
+    exit 1
+fi
+
+echo "Verifying signed certificate for $1 from CA $2 ..."
+echo
+openssl verify -CAfile $2/chain.pem $certfile
+EOF
+chmod +x $1/verify
+
+######## revoke and gencrl ########
+if [[ "$useronly" != "true" ]]; then
+    echo "- revoke ..."
+    cat > $1/revoke <<"EOF"
+#!/bin/bash
+# Arguments: alias, CA [, CA-password]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 || -z $2 ]]; then
+    echo "Please supply a key alias and a CA (e.g., revoke bob myCA)."
+    exit 1
+fi
+keyfile="customers/privatekeys/${1}key.pem"
+certdir="customers/signedcerts/$2"
+certfile="$certdir/${1}cert.pem"
+
+check_ca $2
+
+if [[ ! -e $certfile ]]; then
+    echo "A signed certificate for $1 for CA $2 is not present."
+    exit 1
+fi
+
+echo "Revoking signed certificate for $1 from CA $2 ..."
+echo
+cmd="openssl ca -config ca.config -name $2 -revoke $certfile"
+if [[ -n $3 ]]; then
+    cmd="$cmd -passin pass:$3"
+fi
+eval $cmd
+cleanup_if_failed $? "__none__" "Certificate revocation failed!"
+
+echo
+echo "Done. The signed certificate was left in $certfile."
+EOF
+    chmod +x $1/revoke
+
+    echo "- gencrl ..."
+    cat > $1/gencrl <<"EOF"
+#!/bin/bash
+# Arguments: CA [, CA-password]
+
+. $(dirname $0)/helpers.sh
+
+if [[ -z $1 ]]; then
+    echo "Please supply a CA (e.g., gencrl myCA)."
+    exit 1
+fi
+
+check_ca $1
+
+ts=$(date +%Y%m%d%H%M%S)
+crldir=$1/crl
+
+echo "Generating CRL for CA $1 ..."
+echo
+cmd="openssl ca -config ca.config -name $1 -gencrl -out $crldir/crl-${ts}.pem"
+if [[ -n $2 ]]; then
+    cmd="$cmd -passin pass:$2"
+fi
+eval $cmd
+cleanup_if_failed $? $crldir/crl-${ts}.pem "CRL generation failed!"
+
+openssl crl -in $crldir/crl-${ts}.pem -outform der -out $crldir/crl-${ts}.crl
+echo
+echo "Done. CRL is in $crldir/crl-${ts}.pem and .crl."
+EOF
+    chmod +x $1/gencrl
+fi
+
+echo "Copying newCA script(s) ..."
+if [[ "$useronly" == "true" ]]; then
+    cp newCA-user $1/newCA
+else
+    cp newCA $1
+    cp newSubCA $1
+fi
+if [[ "$useronly" != "true" ]]; then
+    echo "Creating initial ca.config file ..."
+
+    cat > $1/ca.config <<EOF
+[ ca ]
+
+default_ca             = none
+
+[ policy_any ]
+
+countryName            = supplied
+stateOrProvinceName    = optional
+localityName           = optional
+organizationName       = optional
+organizationalUnitName = optional
+commonName             = supplied
+emailAddress           = optional
+
+EOF
+fi
+
+echo
+echo "Install complete."
+echo
+echo "You still need to run the newCA script in $1 in order to establish"
+echo "or set up a new certificate authority."

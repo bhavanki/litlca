@@ -1,0 +1,7 @@
+#!/bin/bash
+
+VERSION=0.1
+
+tar czf litlca-$VERSION.tar.gz \
+    install newCA newCA-user newSubCA \
+    history.md README.md LICENSE.txt
